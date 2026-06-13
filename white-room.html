@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wall Panels VR — HDRI</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #111; font-family: system-ui; color: #eee; }
+  #info { position: absolute; top: 10px; left: 10px; z-index: 100; font-size: 14px; }
+  #bgToggle {
+    position: absolute; top: 10px; right: 10px; z-index: 100;
+    background: rgba(20,20,22,0.8); color: #eee; border: 1px solid #444;
+    padding: 6px 12px; border-radius: 4px; cursor: pointer; font: 13px system-ui;
+  }
+  #bgToggle:hover { background: rgba(40,40,42,0.9); }
+</style>
+</head>
+<body>
+<div id="info">Quest 3: tap "ENTER VR" → walk up. Desktop: drag to look.</div>
+<button id="bgToggle">Show HDRI Background</button>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+
+// ---------- renderer ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+// ---------- scene & camera ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x202024);
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);
+camera.position.set(0, 1.6, 4);
+
+// ---------- HDRI environment (Poly Haven, CC0, hotlink-friendly with CORS) ----------
+// Alternatives: brown_photostudio_02_2k.hdr, photo_studio_01_2k.hdr, kloofendal_43d_clear_puresky_2k.hdr
+const HDRI_URL = 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/studio_small_08_2k.hdr';
+
+let hdrTexture = null;
+let showHdrBg = false;
+
+new RGBELoader().load(
+  HDRI_URL,
+  (texture) => {
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    hdrTexture = texture;
+    scene.environment = texture;
+    if (showHdrBg) scene.background = texture;
+  },
+  undefined,
+  (err) => {
+    console.warn('HDRI load failed — falling back to plain background. If this is a CORS issue, host the .hdr file alongside this HTML in your repo and change HDRI_URL to a relative path like "./studio_small_08_2k.hdr".', err);
+  }
+);
+
+// Background toggle
+const bgBtn = document.getElementById('bgToggle');
+bgBtn.addEventListener('click', () => {
+  showHdrBg = !showHdrBg;
+  if (showHdrBg && hdrTexture) {
+    scene.background = hdrTexture;
+    bgBtn.textContent = 'Hide HDRI Background';
+  } else {
+    scene.background = new THREE.Color(0x202024);
+    bgBtn.textContent = 'Show HDRI Background';
+  }
+});
+
+// ---------- floor ----------
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(20, 20),
+  new THREE.MeshStandardMaterial({ color: 0x2a2a2c, roughness: 0.9, metalness: 0.0 })
+);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// ---------- backing wall (dark, so reveal gaps read as shadow) ----------
+const backing = new THREE.Mesh(
+  new THREE.PlaneGeometry(10, 8),
+  new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 1.0 })
+);
+backing.position.set(0, 2, -0.02);
+scene.add(backing);
+
+// ---------- panel material: brushed grey metal ----------
+const panelMat = new THREE.MeshPhysicalMaterial({
+  color: 0x9a9c9e,
+  metalness: 0.88,
+  roughness: 0.38,
+  clearcoat: 0.15,
+  clearcoatRoughness: 0.4,
+  anisotropy: 0.7,
+  anisotropyRotation: 0,
+});
+
+function brushedRoughness() {
+  const c = document.createElement('canvas');
+  c.width = 1024; c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#888'; ctx.fillRect(0, 0, c.width, c.height);
+  const img = ctx.getImageData(0, 0, c.width, c.height);
+  for (let y = 0; y < c.height; y++) {
+    let v = 128;
+    for (let x = 0; x < c.width; x++) {
+      v += (Math.random() - 0.5) * 12;
+      v = Math.max(110, Math.min(160, v));
+      const i = (y * c.width + x) * 4;
+      img.data[i] = img.data[i+1] = img.data[i+2] = v;
+      img.data[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return tex;
+}
+panelMat.roughnessMap = brushedRoughness();
+
+// ---------- panel grid (irregular row-based, like the photo) ----------
+const WALL_W = 6, WALL_H = 4.2, GAP = 0.012, DEPTH = 0.025;
+const panels = [];
+
+let seed = 7;
+function rand() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+function pick(arr) { return arr[Math.floor(rand() * arr.length)]; }
+
+let z = 0;
+while (z < WALL_H - 0.1) {
+  let rowH = pick([0.5, 0.7, 0.9, 1.1, 1.3]);
+  rowH = Math.min(rowH, WALL_H - z);
+  const splits = pick([1, 2, 2, 3, 3, 4]);
+  let widths = [];
+  for (let i = 0; i < splits; i++) widths.push(0.6 + rand());
+  const sum = widths.reduce((a, b) => a + b, 0);
+  widths = widths.map(w => w * WALL_W / sum);
+  let x = -WALL_W / 2;
+  for (const w of widths) {
+    panels.push({ x: x + GAP / 2, z: z + GAP / 2, w: w - GAP, h: rowH - GAP });
+    x += w;
+  }
+  z += rowH;
+}
+
+const wallGroup = new THREE.Group();
+for (const p of panels) {
+  const geo = new THREE.BoxGeometry(p.w, p.h, DEPTH);
+  const mesh = new THREE.Mesh(geo, panelMat);
+  mesh.position.set(p.x + p.w / 2, p.z + p.h / 2, DEPTH / 2);
+  wallGroup.add(mesh);
+}
+scene.add(wallGroup);
+
+// ---------- key/fill/top lights on top of IBL ----------
+const key = new THREE.DirectionalLight(0xfff4e8, 1.2);
+key.position.set(-3, 6, 4);
+scene.add(key);
+
+const fill = new THREE.DirectionalLight(0xc8d8ff, 0.4);
+fill.position.set(4, 3, 3);
+scene.add(fill);
+
+const top = new THREE.RectAreaLight(0xffffff, 4, 4, 2);
+top.position.set(0, 5, 2);
+top.lookAt(0, 2, 0);
+scene.add(top);
+
+// ---------- desktop controls ----------
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 2, 0);
+controls.update();
+
+// ---------- resize ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- render loop ----------
+renderer.setAnimationLoop(() => {
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
