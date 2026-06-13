@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>White Room — WebXR</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #d8dee0; height: 100%; }
+  #info {
+    position: absolute; top: 12px; left: 12px; z-index: 10;
+    font: 13px/1.4 -apple-system, system-ui, sans-serif;
+    color: #444; background: rgba(255,255,255,0.85);
+    padding: 8px 12px; border-radius: 4px; pointer-events: none;
+    max-width: 320px;
+  }
+</style>
+</head>
+<body>
+<div id="info">White Room — tap "Enter VR" on Quest 3 browser.</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xd8dee0);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 200);
+camera.position.set(0, 1.6, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+// Environment map — gives metal surfaces something to reflect
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const W = 50, H = 3, D = 50;
+
+// --- Procedural wall texture: row-based irregular panel grid (Blender-script logic) ---
+function makeWallTexture(widthM, heightM, seed) {
+  const pxPerMeter = 48;
+  const cw = Math.round(widthM * pxPerMeter);
+  const ch = Math.round(heightM * pxPerMeter);
+  const canvas = document.createElement('canvas');
+  canvas.width = cw; canvas.height = ch;
+  const ctx = canvas.getContext('2d');
+
+  let s = seed;
+  const rand = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+
+  // Base matte cool grey (matches Blender: 0.62, 0.63, 0.64)
+  ctx.fillStyle = '#9ea1a4';
+  ctx.fillRect(0, 0, cw, ch);
+
+  const mPx = pxPerMeter;
+  const rowHeights = [0.6, 0.9, 1.2, 1.5, 1.8];
+  const REVEAL = 2;        // dark reveal line thickness (px)
+  const EDGE_HI = 1;       // top highlight thickness
+  const EDGE_LO = 1;       // bottom shadow thickness
+
+  // Row-based irregular layout
+  let y = 0;
+  while (y < ch) {
+    const rowH = Math.min(rowHeights[Math.floor(rand() * rowHeights.length)] * mPx, ch - y);
+    let x = 0;
+    while (x < cw) {
+      const panelW = Math.min((1.2 + rand() * 2.8) * mPx, cw - x);
+
+      // Per-panel base tint (subtle variation for brushed-metal feel)
+      const v = (rand() - 0.5) * 10;
+      const r = 158 + v | 0, g = 161 + v | 0, b = 164 + v | 0;
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(x, y, panelW, rowH);
+
+      // Subtle vertical gradient on each panel (brushed sheen)
+      const grad = ctx.createLinearGradient(x, y, x, y + rowH);
+      grad.addColorStop(0, 'rgba(255,255,255,0.10)');
+      grad.addColorStop(0.5, 'rgba(255,255,255,0)');
+      grad.addColorStop(1, 'rgba(0,0,0,0.08)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x, y, panelW, rowH);
+
+      // Top edge highlight (light catches panel top)
+      ctx.fillStyle = 'rgba(220,225,228,0.7)';
+      ctx.fillRect(x, y, panelW, EDGE_HI);
+      // Bottom edge shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fillRect(x, y + rowH - EDGE_LO, panelW, EDGE_LO);
+
+      // Right reveal line (dark)
+      ctx.fillStyle = '#0a0a0a';
+      ctx.fillRect(x + panelW - REVEAL, y, REVEAL, rowH);
+
+      x += panelW;
+    }
+    // Bottom reveal line of this row
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fillRect(0, y + rowH - REVEAL, cw, REVEAL);
+    y += rowH;
+  }
+
+  // Brushed-metal horizontal streaks (very subtle)
+  const img = ctx.getImageData(0, 0, cw, ch);
+  for (let py = 0; py < ch; py++) {
+    const streak = (rand() - 0.5) * 5;
+    for (let px = 0; px < cw; px++) {
+      const idx = (py * cw + px) * 4;
+      img.data[idx]   = Math.max(0, Math.min(255, img.data[idx]   + streak));
+      img.data[idx+1] = Math.max(0, Math.min(255, img.data[idx+1] + streak));
+      img.data[idx+2] = Math.max(0, Math.min(255, img.data[idx+2] + streak));
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  return tex;
+}
+
+// Clean tileable floor (subtle large tiles, almost seamless polished concrete)
+function makeFloorTexture(repeatX, repeatY) {
+  const size = 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#a8acaf';
+  ctx.fillRect(0, 0, size, size);
+  // Subtle radial sheen
+  const grad = ctx.createRadialGradient(size*0.4, size*0.3, 0, size*0.5, size*0.5, size*0.7);
+  grad.addColorStop(0, 'rgba(255,255,255,0.08)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.04)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  // Very thin reveal lines
+  ctx.fillStyle = 'rgba(20,20,20,0.6)';
+  ctx.fillRect(0, 0, 2, size);
+  ctx.fillRect(0, 0, size, 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(repeatX, repeatY);
+  tex.anisotropy = 8;
+  return tex;
+}
+
+const FLOOR_TILE = 5;
+
+// Walls — brushed aluminum / powder-coated steel (Blender: metallic 0.85, roughness 0.42)
+function wallMat(widthM, seed) {
+  return new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    metalness: 0.55,
+    roughness: 0.45,
+    map: makeWallTexture(widthM, H, seed)
+  });
+}
+const wallGeoNS = new THREE.PlaneGeometry(W, H);
+const wallGeoEW = new THREE.PlaneGeometry(D, H);
+const wallN = new THREE.Mesh(wallGeoNS, wallMat(W, 17)); wallN.position.set(0, H/2, -D/2); scene.add(wallN);
+const wallS = new THREE.Mesh(wallGeoNS, wallMat(W, 83)); wallS.position.set(0, H/2, D/2); wallS.rotation.y = Math.PI; scene.add(wallS);
+const wallE = new THREE.Mesh(wallGeoEW, wallMat(D, 41)); wallE.position.set(W/2, H/2, 0); wallE.rotation.y = -Math.PI/2; scene.add(wallE);
+const wallW = new THREE.Mesh(wallGeoEW, wallMat(D, 127)); wallW.position.set(-W/2, H/2, 0); wallW.rotation.y = Math.PI/2; scene.add(wallW);
+
+// Floor — polished concrete look
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(W, D),
+  new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.55, metalness: 0.25,
+    map: makeFloorTexture(W / FLOOR_TILE, D / FLOOR_TILE)
+  })
+);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// LED grid ceiling — glowing panels separated by thin dark grid lines
+const TILES_X = 25;
+const TILES_Z = 25;
+const FRAME = 0.04;
+
+const tileW = W / TILES_X;
+const tileD = D / TILES_Z;
+const panelW = tileW - FRAME;
+const panelD = tileD - FRAME;
+
+// Dark frame backing (the grid lines) — sits HIGHER (further from viewer)
+const frame = new THREE.Mesh(
+  new THREE.PlaneGeometry(W, D),
+  new THREE.MeshBasicMaterial({ color: 0x2a2a2a, side: THREE.DoubleSide })
+);
+frame.position.set(0, H, 0);
+frame.rotation.x = Math.PI / 2;
+scene.add(frame);
+
+// Glowing panels — sit LOWER (closer to viewer looking up)
+const panelMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+const panelGeo = new THREE.PlaneGeometry(panelW, panelD);
+for (let i = 0; i < TILES_X; i++) {
+  for (let j = 0; j < TILES_Z; j++) {
+    const x = -W/2 + tileW/2 + i * tileW;
+    const z = -D/2 + tileD/2 + j * tileD;
+    const panel = new THREE.Mesh(panelGeo, panelMat);
+    panel.position.set(x, H - 0.01, z);
+    panel.rotation.x = -Math.PI / 2;
+    scene.add(panel);
+  }
+}
+
+// Lighting — bright diffuse from above
+scene.add(new THREE.HemisphereLight(0xffffff, 0xbac2c4, 1.6));
+scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+const fill = new THREE.DirectionalLight(0xffffff, 0.4);
+fill.position.set(0, H, 0);
+fill.target.position.set(0.5, 0, 0.5);
+scene.add(fill, fill.target);
+
+renderer.setAnimationLoop(() => renderer.render(scene, camera));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
