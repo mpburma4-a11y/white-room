@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>White Room — WebXR</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #111; height: 100%; }
+  #info {
+    position: absolute; top: 12px; left: 12px; z-index: 10;
+    font: 13px/1.4 -apple-system, system-ui, sans-serif;
+    color: #eee; background: rgba(20,20,22,0.7);
+    padding: 8px 12px; border-radius: 4px; pointer-events: none;
+    max-width: 320px;
+  }
+</style>
+</head>
+<body>
+<div id="info">White Room — tap "Enter VR" on Quest 3 browser.</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// --- Renderer ---
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+// --- Scene & camera ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x202024);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+camera.position.set(0, 1.6, 0);
+
+// --- Environment (IBL for metal reflections) ---
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+
+// --- Room dimensions ---
+const W = 50, H = 3, D = 50;
+
+// --- Brushed roughness map (shared by all panels) ---
+function brushedRoughness() {
+  const c = document.createElement('canvas');
+  c.width = 1024; c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#888'; ctx.fillRect(0, 0, c.width, c.height);
+  const img = ctx.getImageData(0, 0, c.width, c.height);
+  for (let y = 0; y < c.height; y++) {
+    let v = 128;
+    for (let x = 0; x < c.width; x++) {
+      v += (Math.random() - 0.5) * 12;
+      v = Math.max(110, Math.min(160, v));
+      const i = (y * c.width + x) * 4;
+      img.data[i] = img.data[i+1] = img.data[i+2] = v;
+      img.data[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return tex;
+}
+
+// --- Shared panel material (brushed grey metal) ---
+const panelMat = new THREE.MeshPhysicalMaterial({
+  color: 0x9a9c9e,
+  metalness: 0.88,
+  roughness: 0.38,
+  clearcoat: 0.15,
+  clearcoatRoughness: 0.4,
+  anisotropy: 0.7,
+  anisotropyRotation: 0,
+  roughnessMap: brushedRoughness()
+});
+
+// --- Build a single panel wall (extruded irregular grid) ---
+function buildPanelWall(widthM, heightM, seed) {
+  const group = new THREE.Group();
+  const GAP = 0.012;
+  const DEPTH = 0.025;
+  const rowHeights = [0.5, 0.7, 0.9, 1.1, 1.3];
+
+  let s = seed;
+  const rand = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+  const pick = arr => arr[Math.floor(rand() * arr.length)];
+
+  let y = 0;
+  while (y < heightM - 0.05) {
+    let rowH = Math.min(pick(rowHeights), heightM - y);
+    let x = 0;
+    while (x < widthM - 0.05) {
+      let panelW = Math.min(1.5 + rand() * 2.5, widthM - x);
+      const w = panelW - GAP;
+      const h = rowH - GAP;
+      if (w > 0.1 && h > 0.1) {
+        const geo = new THREE.BoxGeometry(w, h, DEPTH);
+        const mesh = new THREE.Mesh(geo, panelMat);
+        mesh.position.set(
+          x + panelW/2 - widthM/2,
+          y + rowH/2,
+          DEPTH/2
+        );
+        group.add(mesh);
+      }
+      x += panelW;
+    }
+    y += rowH;
+  }
+
+  // Dark backing so reveal gaps read as shadow lines
+  const backing = new THREE.Mesh(
+    new THREE.PlaneGeometry(widthM, heightM),
+    new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 1.0 })
+  );
+  backing.position.set(0, heightM/2, 0);
+  group.add(backing);
+
+  return group;
+}
+
+// --- Place 4 walls (each panels face inward toward room center) ---
+const wallN = buildPanelWall(W, H, 17);  wallN.position.set(0, 0, -D/2);                          scene.add(wallN);
+const wallS = buildPanelWall(W, H, 83);  wallS.position.set(0, 0,  D/2); wallS.rotation.y = Math.PI;     scene.add(wallS);
+const wallE = buildPanelWall(D, H, 41);  wallE.position.set( W/2, 0, 0); wallE.rotation.y = -Math.PI/2; scene.add(wallE);
+const wallW = buildPanelWall(D, H, 127); wallW.position.set(-W/2, 0, 0); wallW.rotation.y =  Math.PI/2; scene.add(wallW);
+
+// --- Floor (polished concrete) ---
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(W, D),
+  new THREE.MeshStandardMaterial({ color: 0x9a9d9f, roughness: 0.55, metalness: 0.25 })
+);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// --- LED grid ceiling (glowing white panels with dark grid frame) ---
+const TILES_X = 20, TILES_Z = 20, FRAME = 0.05;
+const tileW = W / TILES_X, tileD = D / TILES_Z;
+const panelW = tileW - FRAME, panelD = tileD - FRAME;
+
+const frame = new THREE.Mesh(
+  new THREE.PlaneGeometry(W, D),
+  new THREE.MeshBasicMaterial({ color: 0x1a1a1a, side: THREE.DoubleSide })
+);
+frame.position.set(0, H, 0);
+frame.rotation.x = Math.PI / 2;
+scene.add(frame);
+
+const ledMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+const ledGeo = new THREE.PlaneGeometry(panelW, panelD);
+for (let i = 0; i < TILES_X; i++) {
+  for (let j = 0; j < TILES_Z; j++) {
+    const x = -W/2 + tileW/2 + i * tileW;
+    const z = -D/2 + tileD/2 + j * tileD;
+    const led = new THREE.Mesh(ledGeo, ledMat);
+    led.position.set(x, H - 0.01, z);
+    led.rotation.x = -Math.PI / 2;
+    scene.add(led);
+  }
+}
+
+// --- Lighting (on top of IBL) ---
+scene.add(new THREE.HemisphereLight(0xffffff, 0x404045, 0.8));
+scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+const top = new THREE.DirectionalLight(0xffffff, 0.6);
+top.position.set(0, H, 0);
+top.target.position.set(0.5, 0, 0.5);
+scene.add(top, top.target);
+
+// --- Loop ---
+renderer.setAnimationLoop(() => renderer.render(scene, camera));
+
+// --- Resize ---
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
