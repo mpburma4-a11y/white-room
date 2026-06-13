@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>White Room — WebXR</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #111; height: 100%; }
+  #info {
+    position: absolute; top: 12px; left: 12px; z-index: 10;
+    font: 13px/1.4 -apple-system, system-ui, sans-serif;
+    color: #eee; background: rgba(20,20,22,0.7);
+    padding: 8px 12px; border-radius: 4px; pointer-events: none;
+    max-width: 320px;
+  }
+</style>
+</head>
+<body>
+<div id="info">White Room — tap "Enter VR" on Quest 3 browser.</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+// --- Renderer ---
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setFramebufferScaleFactor(1.4);  // crisper VR
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+// --- Scene & camera ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a1c);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+camera.position.set(0, 1.6, 0);
+
+// --- Environment (guaranteed RoomEnvironment fallback, no CORS) ---
+const pmrem = new THREE.PMREMGenerator(renderer);
+pmrem.compileEquirectangularShader();
+scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+
+// Optional: try to upgrade with real HDR from threejs.org (CORS-enabled)
+new RGBELoader().load(
+  'https://threejs.org/examples/textures/equirectangular/royal_esplanade_1k.hdr',
+  (tex) => {
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    scene.environment = pmrem.fromEquirectangular(tex).texture;
+    tex.dispose();
+  },
+  undefined,
+  () => { /* keep RoomEnvironment fallback silently */ }
+);
+
+// --- Room dimensions ---
+const W = 50, H = 3, D = 50;
+
+// --- Brushed roughness map (shared) ---
+function brushedRoughness() {
+  const c = document.createElement('canvas');
+  c.width = 1024; c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#888'; ctx.fillRect(0, 0, c.width, c.height);
+  const img = ctx.getImageData(0, 0, c.width, c.height);
+  for (let y = 0; y < c.height; y++) {
+    let v = 128;
+    for (let x = 0; x < c.width; x++) {
+      v += (Math.random() - 0.5) * 14;
+      v = Math.max(105, Math.min(165, v));
+      const i = (y * c.width + x) * 4;
+      img.data[i] = img.data[i+1] = img.data[i+2] = v;
+      img.data[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return tex;
+}
+
+// --- Shared panel material (brushed grey metal) ---
+const panelMat = new THREE.MeshStandardMaterial({
+  color: 0xb0b3b6,
+  metalness: 0.6,
+  roughness: 0.45,
+  roughnessMap: brushedRoughness(),
+  envMapIntensity: 1.2
+});
+
+// --- Build a wall as ONE merged mesh (perf) ---
+function buildPanelWall(widthM, heightM, seed) {
+  const group = new THREE.Group();
+  const GAP = 0.015;
+  const DEPTH = 0.03;
+  const rowHeights = [0.6, 0.9, 1.2, 1.5];
+
+  let s = seed;
+  const rand = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+  const pick = arr => arr[Math.floor(rand() * arr.length)];
+
+  const geos = [];
+  let y = 0;
+  while (y < heightM - 0.05) {
+    const rowH = Math.min(pick(rowHeights), heightM - y);
+    let x = 0;
+    while (x < widthM - 0.05) {
+      const panelW = Math.min(1.5 + rand() * 2.8, widthM - x);
+      const w = panelW - GAP;
+      const h = rowH - GAP;
+      if (w > 0.1 && h > 0.1) {
+        const g = new THREE.BoxGeometry(w, h, DEPTH);
+        g.translate(x + panelW/2 - widthM/2, y + rowH/2, DEPTH/2);
+        geos.push(g);
+      }
+      x += panelW;
+    }
+    y += rowH;
+  }
+  const merged = mergeGeometries(geos);
+  geos.forEach(g => g.dispose());
+  group.add(new THREE.Mesh(merged, panelMat));
+
+  // Dark backing for reveal shadows
+  const backing = new THREE.Mesh(
+    new THREE.PlaneGeometry(widthM, heightM),
+    new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 1.0 })
+  );
+  backing.position.set(0, heightM/2, 0);
+  group.add(backing);
+
+  return group;
+}
+
+// --- Place 4 walls ---
+const wallN = buildPanelWall(W, H, 17);  wallN.position.set(0, 0, -D/2);                                scene.add(wallN);
+const wallS = buildPanelWall(W, H, 83);  wallS.position.set(0, 0,  D/2); wallS.rotation.y = Math.PI;    scene.add(wallS);
+const wallE = buildPanelWall(D, H, 41);  wallE.position.set( W/2, 0, 0); wallE.rotation.y = -Math.PI/2; scene.add(wallE);
+const wallW = buildPanelWall(D, H, 127); wallW.position.set(-W/2, 0, 0); wallW.rotation.y =  Math.PI/2; scene.add(wallW);
+
+// --- Floor (polished concrete) ---
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(W, D),
+  new THREE.MeshStandardMaterial({ color: 0x8e9194, roughness: 0.5, metalness: 0.3, envMapIntensity: 1.0 })
+);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// --- LED grid ceiling (single merged frame + single instanced-merged panel mesh) ---
+const TILES_X = 12, TILES_Z = 12, FRAME = 0.06;
+const tileW = W / TILES_X, tileD = D / TILES_Z;
+const panelW = tileW - FRAME, panelD = tileD - FRAME;
+
+const frame = new THREE.Mesh(
+  new THREE.PlaneGeometry(W, D),
+  new THREE.MeshBasicMaterial({ color: 0x141414, side: THREE.DoubleSide })
+);
+frame.position.set(0, H, 0);
+frame.rotation.x = Math.PI / 2;
+scene.add(frame);
+
+const ledGeos = [];
+for (let i = 0; i < TILES_X; i++) {
+  for (let j = 0; j < TILES_Z; j++) {
+    const x = -W/2 + tileW/2 + i * tileW;
+    const z = -D/2 + tileD/2 + j * tileD;
+    const g = new THREE.PlaneGeometry(panelW, panelD);
+    g.rotateX(-Math.PI / 2);
+    g.translate(x, H - 0.01, z);
+    ledGeos.push(g);
+  }
+}
+const ledMerged = mergeGeometries(ledGeos);
+ledGeos.forEach(g => g.dispose());
+scene.add(new THREE.Mesh(ledMerged, new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide })));
+
+// --- Strong scene lighting (works even if HDR fails) ---
+scene.add(new THREE.HemisphereLight(0xffffff, 0x404045, 1.0));
+scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+
+const key1 = new THREE.DirectionalLight(0xffffff, 0.8);
+key1.position.set(10, H, 10);
+scene.add(key1);
+
+const key2 = new THREE.DirectionalLight(0xffffff, 0.5);
+key2.position.set(-10, H, -10);
+scene.add(key2);
+
+// --- Loop ---
+renderer.setAnimationLoop(() => renderer.render(scene, camera));
+
+// --- Resize ---
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
